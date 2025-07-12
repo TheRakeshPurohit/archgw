@@ -4,8 +4,8 @@
 <div align="center">
 
 
-_The proxy server and the universal data plane for AI-native apps._<br><br>
-Arch handles the *pesky low-level work* in building AI agents like clarifying vague user inputs, routing prompts to the right agents, calling tools for simple tasks, and unifying access to large language models (LLMs) - all without locking you into a framework. Move faster by focusing on the high-level logic of your agents.
+_Arch is a proxy server designed as a modular edge and AI gateway for agentic apps_<br><br>
+ Arch handles the *pesky low-level work* in building agentic apps — like applying guardrails, clarifying vague user input, routing prompts to the right agent, and unifying access to any LLM. It’s a language and framework friendly infrastructure layer designed to help you build and ship agentic apps faster.
 
 
 [Quickstart](#Quickstart) •
@@ -80,9 +80,9 @@ Arch's CLI allows you to manage and interact with the Arch gateway efficiently. 
 > We recommend that developers create a new Python virtual environment to isolate dependencies before installing Arch. This ensures that archgw and its dependencies do not interfere with other packages on your system.
 
 ```console
-$ python -m venv venv
+$ python3.12 -m venv venv
 $ source venv/bin/activate   # On Windows, use: venv\Scripts\activate
-$ pip install archgw==0.3.3
+$ pip install archgw==0.3.4
 ```
 
 ### Build Agentic Apps with Arch Gateway
@@ -104,10 +104,8 @@ listeners:
     timeout: 30s
 
 llm_providers:
-  - name: gpt-4o
-    access_key: $OPENAI_API_KEY
-    provider: openai
-    model: gpt-4o
+  - access_key: $OPENAI_API_KEY
+    model: openai/gpt-4o
 
 system_prompt: |
   You are a helpful assistant.
@@ -150,13 +148,10 @@ endpoints:
 ```sh
 
 $ archgw up arch_config.yaml
-2024-12-05 16:56:27,979 - cli.main - INFO - Starting archgw cli version: 0.1.5
-...
+2024-12-05 16:56:27,979 - cli.main - INFO - Starting archgw cli version: 0.3.4
 2024-12-05 16:56:28,485 - cli.utils - INFO - Schema validation successful!
 2024-12-05 16:56:28,485 - cli.main - INFO - Starting arch model server and arch gateway
-...
 2024-12-05 16:56:51,647 - cli.core - INFO - Container is healthy!
-
 ```
 
 Once the gateway is up you can start interacting with at port 10000 using openai chat completion API.
@@ -204,16 +199,12 @@ listeners:
     timeout: 30s
 
 llm_providers:
-  - name: gpt-4o
-    access_key: $OPENAI_API_KEY
-    provider: openai
-    model: gpt-4o
+  - access_key: $OPENAI_API_KEY
+    model: openai/gpt-4o
     default: true
 
-  - name: mistral-3b
-    access_key: $MISTRAL_API_KEY
-    provider: openai
-    model: mistral-3b-latest
+  - access_key: $MISTRAL_API_KEY
+    model: mistral/mistral-3b-latest
 ```
 
 #### Preference-based Routing
@@ -230,17 +221,18 @@ listeners:
     timeout: 30s
 
 llm_providers:
-  - name: code_generation
+  - model: openai/gpt-4.1
     access_key: $OPENAI_API_KEY
-    provider_interface: openai
-    model: gpt-4.1
-    usage: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+    default: true
+    routing_preferences:
+      - name: code generation
+        description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
 
-  - name: code_understanding
-    provider_interface: openai
+  - model: openai/gpt-4o-mini
     access_key: $OPENAI_API_KEY
-    model: gpt-4o-mini
-    usage: understand and explain existing code snippets, functions, or libraries
+    routing_preferences:
+      - name: code understanding
+        description: understand and explain existing code snippets, functions, or libraries
 ```
 
 Arch uses a lightweight 1.5B autoregressive model to map prompts (and conversation context) to these policies. This approach adapts to intent drift, supports multi-turn conversations, and avoids the brittleness of embedding-based classifiers or manual if/else chains. No retraining is required when adding new models or updating policies — routing is governed entirely by human-readable rules. You can learn more about the design, benchmarks, and methodology behind preference-based routing in our paper:

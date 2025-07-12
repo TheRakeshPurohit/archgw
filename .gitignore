@@ -24,6 +24,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+node_modules/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -101,13 +102,10 @@ venv.bak/
 # mypy
 .mypy_cache/
 
-# VSCode stuff:
-.vscode/
-
 # MacOS Metadata
 *.DS_Store
 
-
+*.yaml_rendered
 
 # =========================================
 

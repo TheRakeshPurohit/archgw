@@ -25,7 +25,7 @@ Arch's CLI allows you to manage and interact with the Arch gateway efficiently. 
 
    $ python -m venv venv
    $ source venv/bin/activate   # On Windows, use: venv\Scripts\activate
-   $ pip install archgw==0.3.3
+   $ pip install archgw==0.3.4
 
 
 Build AI Agent with Arch Gateway
@@ -50,10 +50,8 @@ Create ``arch_config.yaml`` file with the following content:
       timeout: 30s
 
    llm_providers:
-     - name: gpt-4o
-       access_key: $OPENAI_API_KEY
-       provider: openai
-       model: gpt-4o
+     - access_key: $OPENAI_API_KEY
+       model: openai/gpt-4o
 
    system_prompt: |
      You are a helpful assistant.
@@ -153,16 +151,12 @@ Create ``arch_config.yaml`` file with the following content:
       timeout: 30s
 
    llm_providers:
-     - name: gpt-4o
-       access_key: $OPENAI_API_KEY
-       provider_interface: openai
-       model: gpt-4o
+     - access_key: $OPENAI_API_KEY
+       model: openai/gpt-4o
        default: true
 
-     - name: ministral-3b
-       access_key: $MISTRAL_API_KEY
-       provider_interface: openai
-       model: ministral-3b-latest
+     - access_key: $MISTRAL_API_KEY
+       model: mistralministral-3b-latest
 
 Step 2. Start arch gateway
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
