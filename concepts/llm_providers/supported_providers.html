@@ -7,9 +7,9 @@
 <meta content="white" media="(prefers-color-scheme: light)" name="theme-color"/>
 <meta content="black" media="(prefers-color-scheme: dark)" name="theme-color"/>
 <meta content="width=device-width, initial-scale=1" name="viewport"/>
-<title>Supported Providers &amp; Configuration | Arch Docs v0.3.14</title>
-<meta content="Supported Providers &amp; Configuration | Arch Docs v0.3.14" property="og:title"/>
-<meta content="Supported Providers &amp; Configuration | Arch Docs v0.3.14" name="twitter:title"/>
+<title>Supported Providers &amp; Configuration | Arch Docs v0.3.15</title>
+<meta content="Supported Providers &amp; Configuration | Arch Docs v0.3.15" property="og:title"/>
+<meta content="Supported Providers &amp; Configuration | Arch Docs v0.3.15" name="twitter:title"/>
 <link href="../../_static/pygments.css?v=466e7b45" rel="stylesheet" type="text/css"/>
 <link href="../../_static/theme.css?v=42baaae4" rel="stylesheet" type="text/css"/>
 <link href="../../_static/_static/custom.css" rel="stylesheet" type="text/css"/>
@@ -39,7 +39,7 @@
     </a><header class="sticky top-0 z-40 w-full border-b shadow-sm border-border supports-backdrop-blur:bg-background/60 bg-background/95 backdrop-blur"><div class="container flex items-center h-14">
 <div class="hidden mr-4 md:flex">
 <a class="flex items-center mr-6" href="../../index.html">
-<img alt="Logo" class="mr-2 dark:invert" height="24" src="../../_static/favicon.ico" width="24"/><span class="hidden font-bold sm:inline-block text-clip whitespace-nowrap">Arch Docs v0.3.14</span>
+<img alt="Logo" class="mr-2 dark:invert" height="24" src="../../_static/favicon.ico" width="24"/><span class="hidden font-bold sm:inline-block text-clip whitespace-nowrap">Arch Docs v0.3.15</span>
 </a></div><button @click="showSidebar = true" class="inline-flex items-center justify-center h-10 px-0 py-2 mr-2 text-base font-medium transition-colors rounded-md hover:text-accent-foreground hover:bg-transparent md:hidden" type="button">
 <svg aria-hidden="true" fill="currentColor" height="24" viewbox="0 96 960 960" width="24" xmlns="http://www.w3.org/2000/svg">
 <path d="M152.587 825.087q-19.152 0-32.326-13.174t-13.174-32.326q0-19.152 13.174-32.326t32.326-13.174h440q19.152 0 32.326 13.174t13.174 32.326q0 19.152-13.174 32.326t-32.326 13.174h-440Zm0-203.587q-19.152 0-32.326-13.174T107.087 576q0-19.152 13.174-32.326t32.326-13.174h320q19.152 0 32.326 13.174T518.087 576q0 19.152-13.174 32.326T472.587 621.5h-320Zm0-203.587q-19.152 0-32.326-13.174t-13.174-32.326q0-19.152 13.174-32.326t32.326-13.174h440q19.152 0 32.326 13.174t13.174 32.326q0 19.152-13.174 32.326t-32.326 13.174h-440ZM708.913 576l112.174 112.174q12.674 12.674 12.674 31.826t-12.674 31.826Q808.413 764.5 789.261 764.5t-31.826-12.674l-144-144Q600 594.391 600 576t13.435-31.826l144-144q12.674-12.674 31.826-12.674t31.826 12.674q12.674 12.674 12.674 31.826t-12.674 31.826L708.913 576Z"></path>
@@ -75,7 +75,7 @@
 </header>
 <div class="flex-1"><div class="container flex-1 items-start md:grid md:grid-cols-[220px_minmax(0,1fr)] md:gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-10"><aside :aria-hidden="!showSidebar" :class="{ 'translate-x-0': showSidebar }" class="fixed inset-y-0 left-0 md:top-14 z-50 md:z-30 bg-background md:bg-transparent transition-all duration-100 -translate-x-full md:translate-x-0 ml-0 p-6 md:p-0 md:-ml-2 md:h-[calc(100vh-3.5rem)] w-5/6 md:w-full shrink-0 overflow-y-auto border-r border-border md:sticky" id="left-sidebar">
 <a class="!justify-start text-sm md:!hidden bg-background" href="../../index.html">
-<img alt="Logo" class="mr-2 dark:invert" height="16" src="../../_static/favicon.ico" width="16"/><span class="font-bold text-clip whitespace-nowrap">Arch Docs v0.3.14</span>
+<img alt="Logo" class="mr-2 dark:invert" height="16" src="../../_static/favicon.ico" width="16"/><span class="font-bold text-clip whitespace-nowrap">Arch Docs v0.3.15</span>
 </a>
 <div class="relative overflow-hidden md:overflow-auto my-4 md:my-0 h-[calc(100vh-8rem)] md:h-auto">
 <div class="overflow-y-auto h-full w-full relative pr-6">
@@ -152,7 +152,7 @@
 <div class="w-full min-w-0 mx-auto">
 <nav aria-label="breadcrumbs" class="flex items-center mb-4 space-x-1 text-sm text-muted-foreground">
 <a class="overflow-hidden text-ellipsis whitespace-nowrap hover:text-foreground" href="../../index.html">
-<span class="hidden md:inline">Arch Docs v0.3.14</span>
+<span class="hidden md:inline">Arch Docs v0.3.15</span>
 <svg aria-label="Home" class="md:hidden" fill="currentColor" height="18" stroke="none" viewbox="0 96 960 960" width="18" xmlns="http://www.w3.org/2000/svg">
 <path d="M240 856h120V616h240v240h120V496L480 316 240 496v360Zm-80 80V456l320-240 320 240v480H520V696h-80v240H160Zm320-350Z"></path>
 </svg>
@@ -601,6 +601,101 @@ Any provider that implements the OpenAI API interface can be configured using cu
 </span></code></pre></div>
 </div>
 </section>
+<section id="moonshot-ai">
+<h3>Moonshot AI<a @click.prevent="window.navigator.clipboard.writeText($el.href); $el.setAttribute('data-tooltip', 'Copied!'); setTimeout(() =&gt; $el.setAttribute('data-tooltip', 'Copy link to this element'), 2000)" aria-label="Copy link to this element" class="headerlink" data-tooltip="Copy link to this element" href="#moonshot-ai" x-intersect.margin.0%.0%.-70%.0%="activeSection = '#moonshot-ai'"><svg height="1em" viewbox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"></path></svg></a></h3>
+<p><strong>Provider Prefix:</strong> <code class="docutils literal notranslate"><span class="pre">moonshotai/</span></code></p>
+<p><strong>API Endpoint:</strong> <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code></p>
+<p><strong>Authentication:</strong> API Key - Get your Moonshot AI API key from <a class="reference external" href="https://platform.moonshot.ai/" rel="nofollow noopener">Moonshot AI Platform<svg fill="currentColor" height="1em" stroke="none" viewbox="0 96 960 960" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M188 868q-11-11-11-28t11-28l436-436H400q-17 0-28.5-11.5T360 336q0-17 11.5-28.5T400 296h320q17 0 28.5 11.5T760 336v320q0 17-11.5 28.5T720 696q-17 0-28.5-11.5T680 656V432L244 868q-11 11-28 11t-28-11Z"></path></svg></a>.</p>
+<p><strong>Supported Chat Models:</strong> All Moonshot AI chat models including Kimi K2, Moonshot v1, and all future releases.</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 30.0%"/>
+<col style="width: 20.0%"/>
+<col style="width: 50.0%"/>
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model Name</p></th>
+<th class="head"><p>Model ID for Config</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Kimi K2 Preview</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">moonshotai/kimi-k2-0905-preview</span></code></p></td>
+<td><p>Foundation model optimized for agentic tasks with 32B activated parameters</p></td>
+</tr>
+<tr class="row-odd"><td><p>Moonshot v1 32K</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">moonshotai/moonshot-v1-32k</span></code></p></td>
+<td><p>Extended context model with 32K tokens</p></td>
+</tr>
+<tr class="row-even"><td><p>Moonshot v1 128K</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">moonshotai/moonshot-v1-128k</span></code></p></td>
+<td><p>Long context model with 128K tokens</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Configuration Examples:</strong></p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><code><span id="line-1"><span class="nt">llm_providers</span><span class="p">:</span>
+</span><span id="line-2"><span class="w">  </span><span class="c1"># Latest K2 models for agentic tasks</span>
+</span><span id="line-3"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">moonshotai/kimi-k2-0905-preview</span>
+</span><span id="line-4"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$MOONSHOTAI_API_KEY</span>
+</span><span id="line-5">
+</span><span id="line-6"><span class="w">  </span><span class="c1"># V1 models with different context lengths</span>
+</span><span id="line-7"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">moonshotai/moonshot-v1-32k</span>
+</span><span id="line-8"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$MOONSHOTAI_API_KEY</span>
+</span><span id="line-9">
+</span><span id="line-10"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">moonshotai/moonshot-v1-128k</span>
+</span><span id="line-11"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$MOONSHOTAI_API_KEY</span>
+</span></code></pre></div>
+</div>
+</section>
+<section id="zhipu-ai">
+<h3>Zhipu AI<a @click.prevent="window.navigator.clipboard.writeText($el.href); $el.setAttribute('data-tooltip', 'Copied!'); setTimeout(() =&gt; $el.setAttribute('data-tooltip', 'Copy link to this element'), 2000)" aria-label="Copy link to this element" class="headerlink" data-tooltip="Copy link to this element" href="#zhipu-ai" x-intersect.margin.0%.0%.-70%.0%="activeSection = '#zhipu-ai'"><svg height="1em" viewbox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"></path></svg></a></h3>
+<p><strong>Provider Prefix:</strong> <code class="docutils literal notranslate"><span class="pre">zhipu/</span></code></p>
+<p><strong>API Endpoint:</strong> <code class="docutils literal notranslate"><span class="pre">/api/paas/v4/chat/completions</span></code></p>
+<p><strong>Authentication:</strong> API Key - Get your Zhipu AI API key from <a class="reference external" href="https://open.bigmodel.cn/console/overview/" rel="nofollow noopener">Zhipu AI Platform<svg fill="currentColor" height="1em" stroke="none" viewbox="0 96 960 960" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M188 868q-11-11-11-28t11-28l436-436H400q-17 0-28.5-11.5T360 336q0-17 11.5-28.5T400 296h320q17 0 28.5 11.5T760 336v320q0 17-11.5 28.5T720 696q-17 0-28.5-11.5T680 656V432L244 868q-11 11-28 11t-28-11Z"></path></svg></a>.</p>
+<p><strong>Supported Chat Models:</strong> All Zhipu AI GLM models including GLM-4, GLM-4 Flash, and all future releases.</p>
+<table class="docutils align-default">
+<colgroup>
+<col style="width: 30.0%"/>
+<col style="width: 20.0%"/>
+<col style="width: 50.0%"/>
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Model Name</p></th>
+<th class="head"><p>Model ID for Config</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>GLM-4.6</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">zhipu/glm-4.6</span></code></p></td>
+<td><p>Latest and most capable GLM model with enhanced reasoning abilities</p></td>
+</tr>
+<tr class="row-odd"><td><p>GLM-4.5</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">zhipu/glm-4.5</span></code></p></td>
+<td><p>High-performance model with multimodal capabilities</p></td>
+</tr>
+<tr class="row-even"><td><p>GLM-4.5 Air</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">zhipu/glm-4.5-air</span></code></p></td>
+<td><p>Lightweight and fast model optimized for efficiency</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Configuration Examples:</strong></p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><code><span id="line-1"><span class="nt">llm_providers</span><span class="p">:</span>
+</span><span id="line-2"><span class="w">  </span><span class="c1"># Latest GLM models</span>
+</span><span id="line-3"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">zhipu/glm-4.6</span>
+</span><span id="line-4"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$ZHIPU_API_KEY</span>
+</span><span id="line-5">
+</span><span id="line-6"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">zhipu/glm-4.5</span>
+</span><span id="line-7"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$ZHIPU_API_KEY</span>
+</span><span id="line-8">
+</span><span id="line-9"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">zhipu/glm-4.5-air</span>
+</span><span id="line-10"><span class="w">    </span><span class="nt">access_key</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$ZHIPU_API_KEY</span>
+</span></code></pre></div>
+</div>
+</section>
 </section>
 <section id="providers-requiring-base-url">
 <h2>Providers Requiring Base URL<a @click.prevent="window.navigator.clipboard.writeText($el.href); $el.setAttribute('data-tooltip', 'Copied!'); setTimeout(() =&gt; $el.setAttribute('data-tooltip', 'Copy link to this element'), 2000)" aria-label="Copy link to this element" class="headerlink" data-tooltip="Copy link to this element" href="#providers-requiring-base-url" x-intersect.margin.0%.0%.-70%.0%="activeSection = '#providers-requiring-base-url'"><svg height="1em" viewbox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"></path></svg></a></h2>
@@ -763,6 +858,8 @@ Any provider that implements the OpenAI API interface can be configured using cu
 <li><a :data-current="activeSection === '#google-gemini'" class="reference internal" href="#google-gemini">Google Gemini</a></li>
 <li><a :data-current="activeSection === '#together-ai'" class="reference internal" href="#together-ai">Together AI</a></li>
 <li><a :data-current="activeSection === '#xai'" class="reference internal" href="#xai">xAI</a></li>
+<li><a :data-current="activeSection === '#moonshot-ai'" class="reference internal" href="#moonshot-ai">Moonshot AI</a></li>
+<li><a :data-current="activeSection === '#zhipu-ai'" class="reference internal" href="#zhipu-ai">Zhipu AI</a></li>
 </ul>
 </li>
 <li><a :data-current="activeSection === '#providers-requiring-base-url'" class="reference internal" href="#providers-requiring-base-url">Providers Requiring Base URL</a><ul>
@@ -792,7 +889,7 @@ Any provider that implements the OpenAI API interface can be configured using cu
 </div>
 </footer>
 </div>
-<script src="../../_static/documentation_options.js?v=2803b16c"></script>
+<script src="../../_static/documentation_options.js?v=4ccc6128"></script>
 <script src="../../_static/doctools.js?v=9bcbadda"></script>
 <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
 <script defer="defer" src="../../_static/theme.js?v=073f68d9"></script>
