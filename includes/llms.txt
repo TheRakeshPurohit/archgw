@@ -1,6 +1,6 @@
-Plano Docs v0.4.25
+Plano Docs v0.4.26
 llms.txt (auto-generated)
-Generated (UTC): 2026-06-25T00:32:16.269850+00:00
+Generated (UTC): 2026-06-25T23:25:11.792192+00:00
 
 Table of contents
 - Agents (concepts/agents)
@@ -3029,49 +3029,6 @@ signals.environment.exhaustion.severity
 
 “
 
-Legacy attributes (deprecated, still emitted)
-
-The following aggregate keys pre-date the paper taxonomy and are still
-emitted for one release so existing dashboards keep working. They are
-derived from the layered counts above and will be removed in a future
-release. Migrate to the layered keys when convenient.
-
-
-
-
-
-Legacy attribute
-
-Layered equivalent
-
-signals.follow_up.repair.count
-
-signals.interaction.misalignment.count
-
-signals.follow_up.repair.ratio
-
-(computed: misalignment.count / max(user_turns, 1))
-
-signals.frustration.count
-
-Count of disengagement.negative_stance instances
-
-signals.frustration.severity
-
-Derived severity bucket of the above
-
-signals.repetition.count
-
-signals.interaction.stagnation.count
-
-signals.escalation.requested
-
-True if any disengagement.escalation or disengagement.quit fired
-
-signals.positive_feedback.count
-
-signals.interaction.satisfaction.count
-
 Span Events
 
 In addition to span attributes, every detected signal instance is emitted as
@@ -3252,11 +3209,6 @@ signals.efficiency_score   = 1.0
 signals.interaction.disengagement.count    = 6
 signals.interaction.disengagement.severity = 3
 
-# Legacy (deprecated, emitted while dual-emit is on)
-signals.frustration.count     = 4
-signals.frustration.severity  = 2
-signals.escalation.requested  = true
-
 # Per-instance span events
 event: signal.interaction.disengagement.escalation
   signal.type          = "interaction.disengagement.escalation"
@@ -3268,8 +3220,7 @@ event: signal.interaction.disengagement.escalation
 Building Dashboards
 
 Use signal attributes to build monitoring dashboards in Grafana, Honeycomb,
-Datadog, etc. Prefer the layered keys — they align with the paper taxonomy
-and will outlive the legacy keys.
+Datadog, etc. The layered keys align with the paper taxonomy.
 
 Quality distribution: Count of traces by signals.quality
 
@@ -3595,13 +3546,13 @@ $ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Option 1: Install planoai with uv (Recommended)
 
-$ uv tool install planoai==0.4.25
+$ uv tool install planoai==0.4.26
 
 Option 2: Install with pip (Traditional)
 
 $ python -m venv venv
 $ source venv/bin/activate   # On Windows, use: venv\Scripts\activate
-$ pip install planoai==0.4.25
+$ pip install planoai==0.4.26
 
 
 
@@ -5165,7 +5116,7 @@ Find external issues: signals.environment.exhaustion.count > 0
 
 Find inefficient flows: signals.efficiency_score < 0.5
 
-For complete details on all 20 leaf signal types, severity scheme, legacy attribute deprecation, and best practices, see the ../../concepts/signals guide.
+For complete details on all 20 leaf signal types, severity scheme, and best practices, see the ../../concepts/signals guide.
 
 Custom Span Attributes
 
@@ -5263,6 +5214,100 @@ Request headers:
 X-Other-User-Id: usr_999
 
 Result: no attributes are captured from X-Other-User-Id.
+
+Exporting Telemetry Anywhere
+
+Beyond the OTLP/gRPC collector, Plano can stream LLM telemetry directly to
+third-party observability backends through tracing.exporters. The list is
+provider-agnostic: each entry is tagged by its type and points at a URL, so
+new destinations can be added without changing anything else. Exporters run in
+addition to opentracing_grpc_endpoint — you can use one, the other, or both.
+
+PostHog
+
+PostHog is supported as a first-class integration. Every LLM call is captured as
+a PostHog $ai_generation
+event and POSTed to PostHog’s capture API. Setup is intentionally minimal —
+point at your PostHog URL and project token:
+
+tracing:
+  random_sampling: 100
+  exporters:
+    - type: posthog
+      url: https://us.i.posthog.com   # /batch/ is appended automatically
+      api_key: $POSTHOG_API_KEY        # PostHog project token (env expansion supported)
+      distinct_id_header: x-user-id    # optional; omit for anonymous capture
+      capture_messages: false          # optional; send user message as $ai_input
+
+That’s all that’s required. When random_sampling is greater than 0 and at
+least one exporter (or opentracing_grpc_endpoint) is configured, tracing is
+enabled and $ai_generation events begin flowing. They appear under PostHog’s
+AI Observability in the Traces and Generations tabs.
+
+Captured properties
+
+Plano maps span data onto PostHog $ai_* properties:
+
+
+
+
+
+PostHog property
+
+Source
+
+$ai_model
+
+Resolved upstream model (llm.model)
+
+$ai_provider
+
+Provider derived from the resolved model (llm.provider)
+
+$ai_latency
+
+Total call duration in seconds (llm.duration_ms)
+
+$ai_time_to_first_token
+
+Time to first token in seconds, streaming only
+
+$ai_input_tokens / $ai_output_tokens
+
+Prompt / completion token usage
+
+$ai_http_status / $ai_is_error
+
+Upstream HTTP status and error flag
+
+$ai_trace_id / $ai_parent_id
+
+Trace and parent span identifiers
+
+distinct_id
+
+Value of distinct_id_header (else anonymous)
+
+Identifying users
+
+Set distinct_id_header to the request header carrying your user identity
+(for example x-user-id). When present, Plano stamps the value as the PostHog
+distinct_id. When the header is missing — or distinct_id_header is not
+configured — the event is captured anonymously ($process_person_profile is
+set to false), matching PostHog’s anonymous vs. identified semantics.
+
+Capturing message content
+
+By default Plano does not send prompt content off-box. Set
+capture_messages: true to include the (truncated) user message preview as
+$ai_input. Leave it false when prompt content must not leave your data
+plane.
+
+Multiple destinations
+
+exporters is a list, so you can fan out to several backends (and combine
+with an OTLP collector). A common use is shipping to multiple PostHog instances
+(for example separate EU and US projects for data-residency).
 
 Benefits of Using Traceparent Headers
 
@@ -7419,6 +7464,19 @@ tracing:
     static:
       environment: production
       service.team: platform
+  # Provider-agnostic export destinations. LLM spans are streamed to each of
+  # these in addition to any opentracing_grpc_endpoint above.
+  exporters:
+    # PostHog AI observability: each LLM call is captured as an $ai_generation event.
+    - type: posthog
+      # PostHog host. The /batch/ capture path is appended automatically.
+      url: https://us.i.posthog.com
+      # PostHog project API key (token). Supports $ENV_VAR expansion.
+      api_key: $POSTHOG_API_KEY
+      # Optional: request header used as the PostHog distinct_id. Omit for anonymous capture.
+      distinct_id_header: x-user-id
+      # Optional: include the (truncated) user message as $ai_input. Defaults to false.
+      capture_messages: false
 
 ---
 
@@ -7477,7 +7535,7 @@ Create a docker-compose.yml file with the following configuration:
 # docker-compose.yml
 services:
   plano:
-    image: katanemo/plano:0.4.25
+    image: katanemo/plano:0.4.26
     container_name: plano
     ports:
       - "10000:10000" # ingress (client -> plano)
@@ -7547,7 +7605,7 @@ spec:
     spec:
       containers:
         - name: plano
-          image: katanemo/plano:0.4.25
+          image: katanemo/plano:0.4.26
           ports:
             - containerPort: 12000  # LLM gateway (chat completions, model routing)
               name: llm-gateway
