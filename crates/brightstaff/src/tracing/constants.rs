@@ -92,6 +92,18 @@ pub mod llm {
     /// (OpenAI `completion_tokens_details.reasoning_tokens`, Google `thoughts_token_count`)
     pub const REASONING_TOKENS: &str = "llm.usage.reasoning_tokens";
 
+    /// This request's input-token cost (USD), priced from the catalog rates: uncached
+    /// input at the input rate, cached reads at the cached rate, cache creation at the
+    /// plain input rate. Present only when a cost source is configured.
+    pub const INPUT_COST_IN_USD: &str = "llm.usage.input_cost_usd";
+
+    /// This request's output-token cost (USD) = completion tokens x output rate.
+    pub const OUTPUT_COST_IN_USD: &str = "llm.usage.output_cost_usd";
+
+    /// This request's total cost (USD) = input + output. Sum across a session's turns
+    /// (group by `plano.session_id`) for the conversation total.
+    pub const TOTAL_COST_IN_USD: &str = "llm.usage.total_cost_usd";
+
     /// Temperature parameter used
     pub const TEMPERATURE: &str = "llm.temperature";
 
@@ -150,6 +162,61 @@ pub mod plano {
     /// fields (e.g. PostHog). Sourced from the configured
     /// `tracing.exporters[].distinct_id_header`. Absent for anonymous calls.
     pub const DISTINCT_ID: &str = "plano.distinct_id";
+
+    /// Whether the session's provider cache was inferred warm at decision time
+    /// (from the idle gap vs. the provider's cache window).
+    pub const CACHE_WARM: &str = "plano.cache.warm";
+
+    /// How long (ms) since the session was last used — the idle gap warmth is measured
+    /// against.
+    pub const CACHE_IDLE_MS: &str = "plano.cache.idle_ms";
+
+    /// Cumulative switching overhead consumed this session, as a percentage of the
+    /// never-switch baseline (`100 * switch_spend / baseline`). Directly comparable to
+    /// the configured `routing.routing_budget.max_overhead_pct`.
+    pub const SESSION_OVERHEAD_PCT: &str = "plano.session.overhead_pct";
+
+    /// Cumulative overhead (USD) actually spent on paid switches this session — the
+    /// numerator behind `plano.session.overhead_pct`.
+    pub const SESSION_SWITCH_SPEND_IN_USD: &str = "plano.session.switch_spend_in_usd";
+
+    /// Cumulative never-switch baseline (USD) — what staying on the anchor would have
+    /// cost so far. The denominator behind `plano.session.overhead_pct`.
+    pub const SESSION_BASELINE_IN_USD: &str = "plano.session.baseline_in_usd";
+
+    /// Cumulative number of model switches taken during this warm session.
+    pub const SESSION_SWITCHES: &str = "plano.session.switches";
+
+    /// Cumulative *actual* cost (USD, input + output) of the whole conversation, priced
+    /// from the configured catalog rates and refined from real usage each turn. Emitted
+    /// on the routing span; reflects cost through the previous turn (this turn isn't
+    /// billed yet at decision time). Full-proxy path only.
+    pub const SESSION_TOTAL_COST_IN_USD: &str = "plano.session.total_cost_in_usd";
+
+    /// Actual input-cost (USD) of the proposed model switch — computed from input-token
+    /// pricing only, output-token cost deliberately excluded. Negative when the candidate
+    /// is outright cheaper than staying on the warm anchor.
+    pub const SWITCH_COST_IN_USD: &str = "plano.switch.cost_in_usd";
+
+    /// Tokens the switch candidate still has cached from an earlier visit this session
+    /// (a return to a still-warm model). These re-read at the candidate's cached rate
+    /// instead of its uncached rate, which is why the switch cost can be far below a
+    /// full re-ingest. Zero for a first-time (cold) switch.
+    pub const SWITCH_CANDIDATE_WARM_TOKENS: &str = "plano.switch.candidate_warm_tokens";
+
+    /// The overhead ceiling (USD) available when the switch was evaluated —
+    /// `max_overhead_pct% * baseline`. A paid switch is allowed while cumulative spend
+    /// plus this switch's cost stays under it. Directly comparable to `cost_in_usd`.
+    pub const SWITCH_OVERHEAD_CEILING_IN_USD: &str = "plano.switch.overhead_ceiling_in_usd";
+
+    /// Switch outcome: "allowed" or "retained".
+    pub const SWITCH_DECISION: &str = "plano.switch.decision";
+
+    /// The route (`provider/model`, plus route name when routed) the routing-budget gate
+    /// *would* have selected had the switch been allowed. Recorded only on a `retained`
+    /// decision when `routing.routing_budget.record_counterfactual` is enabled.
+    /// Telemetry only — the counterfactual model is never dispatched.
+    pub const SWITCH_COUNTERFACTUAL_ROUTE: &str = "plano.switch.counterfactual_route";
 }
 
 // =============================================================================

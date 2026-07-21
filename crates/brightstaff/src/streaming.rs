@@ -22,10 +22,15 @@ const STREAM_BUFFER_SIZE: usize = 16;
 const USAGE_BUFFER_MAX: usize = 2 * 1024 * 1024;
 use crate::metrics as bs_metrics;
 use crate::metrics::labels as metric_labels;
+use crate::router::model_metrics::ModelRates;
+use crate::router::orchestrator::OrchestratorService;
+use crate::session_cache::{record_route_visit, RouteVisit, SessionBinding};
 use crate::signals::otel::emit_signals_to_span;
 use crate::signals::{SignalAnalyzer, FLAG_MARKER};
 use crate::tracing::{llm, set_service_name};
 use hermesllm::apis::openai::Message;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 /// Parsed usage + resolved-model details from a provider response.
 #[derive(Debug, Default, Clone)]
@@ -39,6 +44,11 @@ struct ExtractedUsage {
     /// The model the upstream actually used. For router aliases (e.g.
     /// `router:software-engineering`), this differs from the request model.
     resolved_model: Option<String>,
+    /// Provider convention for `prompt_tokens`: OpenAI-shape usage folds cached tokens
+    /// *into* `prompt_tokens` (so uncached = prompt - cached), while Anthropic-shape
+    /// reports uncached `input_tokens` separately from `cache_read`/`cache_creation`.
+    /// Set at parse time from which field `prompt_tokens` was sourced. Drives cost math.
+    prompt_includes_cached: bool,
 }
 
 impl ExtractedUsage {
@@ -57,8 +67,9 @@ impl ExtractedUsage {
             }
         }
         if let Some(u) = value.get("usage") {
-            // OpenAI-shape usage
+            // OpenAI-shape usage: `prompt_tokens` includes the cached subset.
             out.prompt_tokens = u.get("prompt_tokens").and_then(|v| v.as_i64());
+            out.prompt_includes_cached = out.prompt_tokens.is_some();
             out.completion_tokens = u.get("completion_tokens").and_then(|v| v.as_i64());
             out.total_tokens = u.get("total_tokens").and_then(|v| v.as_i64());
             out.cached_input_tokens = u
@@ -187,6 +198,44 @@ pub struct LlmMetricsCtx {
     pub upstream_status: u16,
 }
 
+/// Response-side session-update context: refreshes the session binding once the real
+/// response is in hand, so `last_used` and the context-size estimate (`cached_tokens`)
+/// reflect the turn that just completed. The routing decision (model, budget, switches)
+/// was already made and persisted on the request side by [`super::handlers::llm::session_router`];
+/// this only refines the fields that need the response.
+pub struct SessionUpdateCtx {
+    pub orchestrator: Arc<OrchestratorService>,
+    pub session_id: String,
+    pub tenant_id: Option<String>,
+    /// Provider-qualified model this request actually ran on (the router's final pick).
+    pub anchor_model: String,
+    /// The session's never-switch model for this episode — preserved across the refresh.
+    pub default_model: String,
+    pub route_name: Option<String>,
+    pub prefix_hash: Option<u64>,
+    /// Cumulative never-switch baseline from the decision — preserved across the refresh.
+    pub baseline_usd: f64,
+    /// Cumulative switch spend from the decision — preserved across the refresh.
+    pub switch_spend_usd: f64,
+    /// Cumulative switch count from the routing decision — preserved across the refresh.
+    pub switches: u32,
+    /// Per-model route history from the decision — preserved across the refresh, with
+    /// the anchor's entry refined to the real prompt-token count.
+    pub history: Vec<RouteVisit>,
+    /// Cumulative actual conversation cost (USD) through prior turns. This turn's real
+    /// cost is added on top once usage is known.
+    pub session_cost_usd: f64,
+    /// Catalog rates for the dispatched model, resolved request-side (the response path
+    /// is synchronous). `None` when no cost source is configured → no cost is computed.
+    pub cost_rates: Option<ModelRates>,
+    /// Cached-read discount used to price cached input when the feed omits a cached rate.
+    pub cache_read_discount: f64,
+    /// Context-size count to fall back to when the response carries no usage block.
+    pub context_tokens: u64,
+    /// GC bound to store the refreshed binding with.
+    pub gc_ttl: Duration,
+}
+
 /// A processor that tracks streaming metrics
 pub struct ObservableStreamProcessor {
     service_name: String,
@@ -201,6 +250,7 @@ pub struct ObservableStreamProcessor {
     /// from the buffer (they still pass through to the client).
     response_buffer: Vec<u8>,
     llm_metrics: Option<LlmMetricsCtx>,
+    session_update: Option<SessionUpdateCtx>,
     metrics_recorded: bool,
 }
 
@@ -237,6 +287,7 @@ impl ObservableStreamProcessor {
             messages,
             response_buffer: Vec::new(),
             llm_metrics: None,
+            session_update: None,
             metrics_recorded: false,
         }
     }
@@ -246,6 +297,103 @@ impl ObservableStreamProcessor {
     pub fn with_llm_metrics(mut self, ctx: LlmMetricsCtx) -> Self {
         self.llm_metrics = Some(ctx);
         self
+    }
+
+    /// Attach session-update context so the processor refreshes `last_used` and the
+    /// context-size estimate from the real response once usage is known.
+    pub fn with_session_update(mut self, ctx: SessionUpdateCtx) -> Self {
+        self.session_update = Some(ctx);
+        self
+    }
+
+    /// Refresh the session binding from the response so warmth (`last_used`) and the
+    /// context-size estimate (`cached_tokens`) reflect the completed turn.
+    fn handle_session_update(&mut self, usage: &ExtractedUsage) {
+        let Some(update) = self.session_update.take() else {
+            return;
+        };
+        let SessionUpdateCtx {
+            orchestrator,
+            session_id,
+            tenant_id,
+            anchor_model,
+            default_model,
+            route_name,
+            prefix_hash,
+            baseline_usd,
+            switch_spend_usd,
+            switches,
+            mut history,
+            session_cost_usd,
+            cost_rates,
+            cache_read_discount,
+            context_tokens,
+            gc_ttl,
+        } = update;
+
+        // Prefer the real prompt-token count (the tokens a future switch would re-read)
+        // over the request-side estimate; fall back to the estimate when absent.
+        let cached_tokens = usage
+            .prompt_tokens
+            .filter(|&p| p > 0)
+            .map(|p| p as u64)
+            .unwrap_or(context_tokens);
+
+        // Refine the anchor's route-history entry with the real context size, so a later
+        // return to this model prices its warm portion off actual usage.
+        record_route_visit(
+            &mut history,
+            &anchor_model,
+            SystemTime::now(),
+            cached_tokens,
+        );
+
+        // Price this turn from the catalog rates and roll it into the conversation
+        // total. Emit per-request cost on the (llm) span and carry the running total
+        // into the binding so the next turn's routing span can surface it.
+        let session_cost_usd = if let Some(rates) = cost_rates {
+            let (input_cost, output_cost) = rates.request_cost_usd(
+                usage.prompt_tokens.unwrap_or(0).max(0) as u64,
+                usage.cached_input_tokens.unwrap_or(0).max(0) as u64,
+                usage.cache_creation_tokens.unwrap_or(0).max(0) as u64,
+                usage.completion_tokens.unwrap_or(0).max(0) as u64,
+                usage.prompt_includes_cached,
+                cache_read_discount,
+            );
+            let span = tracing::Span::current();
+            let otel_span = span.context();
+            let otel_span = otel_span.span();
+            otel_span.set_attribute(KeyValue::new(llm::INPUT_COST_IN_USD, input_cost));
+            otel_span.set_attribute(KeyValue::new(llm::OUTPUT_COST_IN_USD, output_cost));
+            otel_span.set_attribute(KeyValue::new(
+                llm::TOTAL_COST_IN_USD,
+                input_cost + output_cost,
+            ));
+            session_cost_usd + input_cost + output_cost
+        } else {
+            session_cost_usd
+        };
+
+        bs_metrics::record_session_binding_event(metric_labels::BINDING_EVENT_REFRESH);
+        let binding = SessionBinding {
+            anchor_model,
+            default_model,
+            route_name,
+            prefix_hash,
+            last_used: SystemTime::now(),
+            cached_tokens,
+            baseline_usd,
+            switch_spend_usd,
+            switches,
+            session_cost_usd,
+            history,
+        };
+        // Fire-and-forget: binding bookkeeping must not delay stream completion.
+        tokio::spawn(async move {
+            orchestrator
+                .store_binding(&session_id, tenant_id.as_deref(), binding, Some(gc_ttl))
+                .await;
+        });
     }
 }
 
@@ -357,11 +505,47 @@ impl StreamProcessor for ObservableStreamProcessor {
                     v.max(0) as u64,
                 );
             }
+            // Prompt-cache token counters + hit/miss baseline (cache-blindness is
+            // invisible without these: a reroute that burns a warm cache shows up
+            // here as a miss with zero cache_read tokens).
+            if let Some(v) = usage.cached_input_tokens {
+                bs_metrics::record_llm_tokens(
+                    &ctx.provider,
+                    &ctx.model,
+                    metric_labels::TOKEN_KIND_CACHE_READ,
+                    v.max(0) as u64,
+                );
+            }
+            if let Some(v) = usage.cache_creation_tokens {
+                bs_metrics::record_llm_tokens(
+                    &ctx.provider,
+                    &ctx.model,
+                    metric_labels::TOKEN_KIND_CACHE_WRITE,
+                    v.max(0) as u64,
+                );
+            }
+            if usage.prompt_tokens.is_some() {
+                let cache_active = usage.cached_input_tokens.unwrap_or(0) > 0
+                    || usage.cache_creation_tokens.unwrap_or(0) > 0;
+                bs_metrics::record_prompt_cache_outcome(
+                    &ctx.provider,
+                    &ctx.model,
+                    if cache_active {
+                        metric_labels::PROMPT_CACHE_HIT
+                    } else {
+                        metric_labels::PROMPT_CACHE_MISS
+                    },
+                );
+            }
             if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
                 bs_metrics::record_llm_tokens_usage_missing(&ctx.provider, &ctx.model);
             }
             self.metrics_recorded = true;
         }
+
+        // Session-binding refresh: update `last_used` + the context-size estimate from
+        // the completed turn (the routing decision itself was made request-side).
+        self.handle_session_update(&usage);
         // Release the buffered bytes early; nothing downstream needs them.
         self.response_buffer.clear();
         self.response_buffer.shrink_to_fit();
@@ -612,6 +796,8 @@ mod usage_extraction_tests {
         assert_eq!(u.total_tokens, Some(46));
         assert_eq!(u.cached_input_tokens, Some(5));
         assert_eq!(u.reasoning_tokens, None);
+        // OpenAI folds cached tokens into `prompt_tokens`.
+        assert!(u.prompt_includes_cached);
     }
 
     #[test]
@@ -623,6 +809,8 @@ mod usage_extraction_tests {
         assert_eq!(u.total_tokens, Some(150));
         assert_eq!(u.cached_input_tokens, Some(30));
         assert_eq!(u.cache_creation_tokens, Some(20));
+        // Anthropic reports uncached `input_tokens` separately from cached reads.
+        assert!(!u.prompt_includes_cached);
     }
 
     #[test]

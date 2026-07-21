@@ -33,6 +33,10 @@ pub struct Routing {
     pub session_ttl_seconds: Option<u64>,
     pub session_max_entries: Option<usize>,
     pub session_cache: Option<SessionCacheConfig>,
+    /// Cost gate on model switching within a session. Independent of prompt caching:
+    /// this is a routing decision that applies whenever it is configured, whether or
+    /// not `prompt_caching` is enabled. Presence of this block turns it on.
+    pub routing_budget: Option<RoutingBudget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,7 +137,7 @@ pub enum StateStorageType {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum SelectionPreference {
     Cheapest,
     Fastest,
@@ -218,6 +222,10 @@ pub struct Configuration {
     pub model_aliases: Option<HashMap<String, ModelAlias>>,
     pub overrides: Option<Overrides>,
     pub routing: Option<Routing>,
+    /// Automatic provider prompt caching. Disabled by default; opt in globally with
+    /// `prompt_caching: { enabled: true }`. Applies across the entire Plano instance
+    /// and never changes which model routing selects.
+    pub prompt_caching: Option<PromptCaching>,
     pub system_prompt: Option<String>,
     pub prompt_guards: Option<PromptGuards>,
     pub prompt_targets: Option<Vec<PromptTarget>>,
@@ -242,6 +250,181 @@ pub struct Overrides {
     pub agent_orchestration_model: Option<String>,
     pub orchestrator_model_context_length: Option<usize>,
     pub disable_signals: Option<bool>,
+}
+
+/// Automatic prompt caching, configured once for the whole Plano instance.
+///
+/// Prompt caching keeps a multi-turn conversation's stable prefix warm in the
+/// upstream provider's cache. It never influences which model routing selects — it
+/// only (a) auto-injects provider cache-control markers where supported and
+/// (b) derives an implicit session key from the stable prompt prefix so follow-up
+/// turns reuse the same warm cache. An explicit `X-Model-Affinity` header always wins.
+///
+/// Disabled by default; opt in with `enabled: true`. The remaining knobs are optional
+/// tuning that only take effect while caching is enabled.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PromptCaching {
+    /// Master switch. Defaults to `false` (opt-in).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Derive an implicit session key from the stable prompt prefix so caches survive
+    /// across turns without client changes. Defaults to `true` when caching is enabled.
+    pub session_affinity: Option<bool>,
+    /// Auto-inject provider cache-control markers (e.g. Anthropic `cache_control`).
+    /// Defaults to `true` when caching is enabled.
+    pub inject_cache_control: Option<bool>,
+    /// Minimum estimated prefix tokens before a cache breakpoint is injected.
+    pub min_prefix_tokens: Option<u32>,
+    /// Session pin TTL; falls back to `routing.session_ttl_seconds` when unset.
+    pub session_ttl_seconds: Option<u64>,
+}
+
+/// A cumulative per-session overhead cap governing when routing may switch models.
+///
+/// This is a routing concern, not a caching one: it applies whenever configured,
+/// regardless of whether `prompt_caching` is enabled. The default posture is to stick
+/// to the model a session is warm on. When routing proposes a *different* model,
+/// switching forces the candidate to re-ingest the whole context at its uncached input
+/// rate. With prompt caching the anchor is warm, so the cost is the cache-loss delta
+/// `context_tokens x (candidate_uncached_input_rate - anchor_cached_input_rate)`; without
+/// caching there is no warm cache to lose, so it is
+/// `context_tokens x (candidate_uncached_input_rate - anchor_uncached_input_rate)`. That
+/// input-token cost accrues into the session's cumulative switch spend. The gate allows a paid switch
+/// only while that spend stays within `max_overhead_pct` percent of the session's
+/// running *never-switch* baseline (the cost the session would have paid by staying
+/// on its anchor). A switch that is outright cheaper (negative cost) is free but
+/// never credits the spend back — the "saving" is vs a path we didn't take, not real
+/// spendable money. Requires a cost source in `model_metrics_sources` so per-model
+/// rates are available. Presence of the block turns it on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct RoutingBudget {
+    /// Cap on cumulative switching overhead, as a **percentage** of what the session
+    /// would have cost by never switching (a whole number: `20` = 20%). The promise
+    /// is "this conversation bills at most `max_overhead_pct`% above never-switching."
+    /// `0` means "never pay to switch" (only outright-cheaper switches are ever
+    /// allowed); larger values buy more quality-driven switches. Typical range 10–30.
+    pub max_overhead_pct: f64,
+    /// Reset the running baseline/spend totals when a session goes cold and re-binds
+    /// (a fresh warm episode). Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub replenish_on_rebind: bool,
+    /// Fallback used to estimate a model's cached input rate when the pricing feed
+    /// doesn't publish one: `cached_rate = input_rate * cache_read_discount`. A
+    /// pricing detail, not a cost policy. Defaults to 0.1 (cached reads at 10% of
+    /// input, typical for Anthropic-style caches).
+    pub cache_read_discount: Option<f64>,
+    /// When true, a vetoed switch records the route the gate *would* have taken had
+    /// the switch been allowed, as the `plano.switch.counterfactual_route` span
+    /// attribute. Telemetry only — the counterfactual model is never dispatched.
+    /// Useful for evals/benchmarks that want to quantify the road not taken.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub record_counterfactual: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Fully-resolved routing-budget settings (present only when configured and valid).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectiveRoutingBudget {
+    /// Cumulative switching-overhead cap, as a percentage of the never-switch
+    /// baseline (a whole number: `20` = 20%).
+    pub max_overhead_pct: f64,
+    /// Reset the running baseline/spend totals on cold->warm re-bind.
+    pub replenish_on_rebind: bool,
+    pub cache_read_discount: f64,
+    /// Emit `plano.switch.counterfactual_route` on vetoed switches. Telemetry only.
+    pub record_counterfactual: bool,
+}
+
+pub const DEFAULT_CACHE_READ_DISCOUNT: f64 = 0.1;
+
+impl RoutingBudget {
+    /// Resolve to effective settings, validating the overhead cap and cache-read
+    /// discount.
+    pub fn resolve(&self) -> Result<EffectiveRoutingBudget, String> {
+        if !self.max_overhead_pct.is_finite() || self.max_overhead_pct < 0.0 {
+            return Err(format!(
+                "routing.routing_budget.max_overhead_pct: must be a non-negative number (percent, e.g. 20 for 20%), got {}",
+                self.max_overhead_pct
+            ));
+        }
+        let cache_read_discount = self
+            .cache_read_discount
+            .unwrap_or(DEFAULT_CACHE_READ_DISCOUNT);
+        if !(0.0..=1.0).contains(&cache_read_discount) {
+            return Err(format!(
+                "routing.routing_budget.cache_read_discount: must be between 0.0 and 1.0, got {cache_read_discount}"
+            ));
+        }
+        Ok(EffectiveRoutingBudget {
+            max_overhead_pct: self.max_overhead_pct,
+            replenish_on_rebind: self.replenish_on_rebind,
+            cache_read_discount,
+            record_counterfactual: self.record_counterfactual,
+        })
+    }
+}
+
+impl EffectiveRoutingBudget {
+    /// Resolve from an optional config block; `None` means the gate is off.
+    pub fn from_config(config: Option<&RoutingBudget>) -> Result<Option<Self>, String> {
+        config.map(RoutingBudget::resolve).transpose()
+    }
+}
+
+/// Fully-resolved, instance-wide prompt-caching settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectivePromptCaching {
+    pub enabled: bool,
+    pub session_affinity: bool,
+    pub inject_cache_control: bool,
+    pub min_prefix_tokens: u32,
+    /// Pin TTL override; `None` uses `routing.session_ttl_seconds`.
+    pub session_ttl_seconds: Option<u64>,
+}
+
+pub const DEFAULT_MIN_PREFIX_TOKENS: u32 = 1024;
+
+impl Default for EffectivePromptCaching {
+    fn default() -> Self {
+        EffectivePromptCaching {
+            enabled: false,
+            session_affinity: false,
+            inject_cache_control: false,
+            min_prefix_tokens: DEFAULT_MIN_PREFIX_TOKENS,
+            session_ttl_seconds: None,
+        }
+    }
+}
+
+impl PromptCaching {
+    /// Resolve the instance-wide effective settings. When caching is disabled every
+    /// sub-feature is off, regardless of the individual knobs.
+    pub fn resolve(&self) -> Result<EffectivePromptCaching, String> {
+        if !self.enabled {
+            return Ok(EffectivePromptCaching::default());
+        }
+        Ok(EffectivePromptCaching {
+            enabled: true,
+            session_affinity: self.session_affinity.unwrap_or(true),
+            inject_cache_control: self.inject_cache_control.unwrap_or(true),
+            min_prefix_tokens: self.min_prefix_tokens.unwrap_or(DEFAULT_MIN_PREFIX_TOKENS),
+            session_ttl_seconds: self.session_ttl_seconds,
+        })
+    }
+}
+
+impl EffectivePromptCaching {
+    /// Resolve from an optional config block; `None` means caching is off.
+    pub fn from_config(config: Option<&PromptCaching>) -> Result<Self, String> {
+        config
+            .map(PromptCaching::resolve)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -699,7 +882,10 @@ mod test {
     use pretty_assertions::assert_eq;
     use std::fs;
 
-    use super::{IntoModels, LlmProvider, LlmProviderType};
+    use super::{
+        EffectivePromptCaching, EffectiveRoutingBudget, IntoModels, LlmProvider, LlmProviderType,
+        PromptCaching, RoutingBudget, DEFAULT_CACHE_READ_DISCOUNT, DEFAULT_MIN_PREFIX_TOKENS,
+    };
     use crate::api::open_ai::ToolType;
 
     #[test]
@@ -899,6 +1085,128 @@ disable_signals: false
         let yaml_missing = "{}";
         let overrides: super::Overrides = serde_yaml::from_str(yaml_missing).unwrap();
         assert_eq!(overrides.disable_signals, None);
+    }
+
+    #[test]
+    fn test_prompt_caching_disabled_by_default() {
+        // Absent config → everything off.
+        let effective = EffectivePromptCaching::from_config(None).unwrap();
+        assert!(!effective.enabled);
+        assert!(!effective.session_affinity);
+        assert!(!effective.inject_cache_control);
+
+        // Present but not enabled → still off.
+        let cfg: PromptCaching = serde_yaml::from_str("enabled: false").unwrap();
+        let effective = cfg.resolve().unwrap();
+        assert!(!effective.enabled);
+        assert!(!effective.session_affinity);
+        assert!(!effective.inject_cache_control);
+    }
+
+    #[test]
+    fn test_prompt_caching_enabled_defaults() {
+        // A bare `enabled: true` turns everything on with sensible defaults.
+        let cfg: PromptCaching = serde_yaml::from_str("enabled: true").unwrap();
+        let effective = cfg.resolve().unwrap();
+        assert!(effective.enabled);
+        assert!(effective.session_affinity);
+        assert!(effective.inject_cache_control);
+        assert_eq!(effective.min_prefix_tokens, DEFAULT_MIN_PREFIX_TOKENS);
+        assert_eq!(effective.session_ttl_seconds, None);
+    }
+
+    #[test]
+    fn test_prompt_caching_optional_knobs() {
+        let yaml = r#"
+enabled: true
+session_affinity: false
+inject_cache_control: false
+min_prefix_tokens: 2048
+session_ttl_seconds: 3600
+"#;
+        let cfg: PromptCaching = serde_yaml::from_str(yaml).unwrap();
+        let effective = cfg.resolve().unwrap();
+        assert!(effective.enabled);
+        assert!(!effective.session_affinity);
+        assert!(!effective.inject_cache_control);
+        assert_eq!(effective.min_prefix_tokens, 2048);
+        assert_eq!(effective.session_ttl_seconds, Some(3600));
+    }
+
+    #[test]
+    fn test_prompt_caching_knobs_ignored_when_disabled() {
+        // Knobs only take effect while caching is enabled.
+        let yaml = r#"
+enabled: false
+session_affinity: true
+inject_cache_control: true
+"#;
+        let cfg: PromptCaching = serde_yaml::from_str(yaml).unwrap();
+        let effective = cfg.resolve().unwrap();
+        assert!(!effective.enabled);
+        assert!(!effective.session_affinity);
+        assert!(!effective.inject_cache_control);
+    }
+
+    #[test]
+    fn test_routing_budget_parses() {
+        let yaml = r#"
+max_overhead_pct: 20
+"#;
+        let cfg: RoutingBudget = serde_yaml::from_str(yaml).unwrap();
+        let budget = cfg.resolve().unwrap();
+        assert_eq!(budget.max_overhead_pct, 20.0);
+        // Replenish defaults on.
+        assert!(budget.replenish_on_rebind);
+        assert_eq!(budget.cache_read_discount, DEFAULT_CACHE_READ_DISCOUNT);
+        // Counterfactual recording is opt-in; off unless requested.
+        assert!(!budget.record_counterfactual);
+    }
+
+    #[test]
+    fn test_routing_budget_record_counterfactual_parses() {
+        let yaml = r#"
+max_overhead_pct: 20
+record_counterfactual: true
+"#;
+        let cfg: RoutingBudget = serde_yaml::from_str(yaml).unwrap();
+        let budget = cfg.resolve().unwrap();
+        assert!(budget.record_counterfactual);
+    }
+
+    #[test]
+    fn test_routing_budget_flags_parse() {
+        let yaml = r#"
+max_overhead_pct: 15
+replenish_on_rebind: false
+cache_read_discount: 0.25
+"#;
+        let cfg: RoutingBudget = serde_yaml::from_str(yaml).unwrap();
+        let budget = cfg.resolve().unwrap();
+        assert_eq!(budget.max_overhead_pct, 15.0);
+        assert!(!budget.replenish_on_rebind);
+        assert_eq!(budget.cache_read_discount, 0.25);
+    }
+
+    #[test]
+    fn test_routing_budget_absent_is_off() {
+        // No block configured → gate is off.
+        assert!(EffectiveRoutingBudget::from_config(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_routing_budget_invalid_values_rejected() {
+        let negative: RoutingBudget = serde_yaml::from_str("max_overhead_pct: -1.0").unwrap();
+        assert!(negative.resolve().is_err());
+
+        let bad_discount: RoutingBudget = serde_yaml::from_str(
+            r#"
+max_overhead_pct: 20
+cache_read_discount: 1.5
+"#,
+        )
+        .unwrap();
+        assert!(bad_discount.resolve().is_err());
     }
 
     #[test]

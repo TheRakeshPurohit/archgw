@@ -6,10 +6,14 @@ pub mod clients;
 pub mod providers;
 pub mod transforms;
 // Re-export important types and traits
+pub use apis::openai::CacheControl;
 pub use apis::streaming_shapes::amazon_bedrock_binary_frame::BedrockBinaryFrameDecoder;
 pub use apis::streaming_shapes::sse::{SseEvent, SseStreamIter};
 pub use aws_smithy_eventstream::frame::DecodedFrame;
-pub use providers::id::ProviderId;
+pub use providers::id::{
+    cache_marker_strategy, provider_cache_capability, CacheMarkerStrategy, ProviderCacheCapability,
+    ProviderId,
+};
 pub use providers::request::{ProviderRequest, ProviderRequestError, ProviderRequestType};
 pub use providers::response::{
     ProviderResponse, ProviderResponseError, ProviderResponseType, TokenUsage,

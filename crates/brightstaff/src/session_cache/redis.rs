@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use redis::aio::MultiplexedConnection;
 use redis::AsyncCommands;
 
-use super::{CachedRoute, SessionCache};
+use super::{SessionBinding, SessionCache};
 
 const KEY_PREFIX: &str = "plano:affinity:";
 
@@ -26,18 +26,20 @@ impl RedisSessionCache {
 
 #[async_trait]
 impl SessionCache for RedisSessionCache {
-    async fn get(&self, key: &str) -> Option<CachedRoute> {
+    async fn get(&self, key: &str) -> Option<SessionBinding> {
         let mut conn = self.conn.clone();
         let value: Option<String> = conn.get(Self::make_key(key)).await.ok()?;
         value.and_then(|v| serde_json::from_str(&v).ok())
     }
 
-    async fn put(&self, key: &str, route: CachedRoute, ttl: Duration) {
+    async fn put(&self, key: &str, binding: SessionBinding, ttl: Duration) {
         let mut conn = self.conn.clone();
-        let Ok(json) = serde_json::to_string(&route) else {
+        // The Redis TTL is only a GC bound; warmth is decided by the router from
+        // `binding.last_used`, not by expiry here.
+        let ttl_secs = ttl.as_secs().max(1);
+        let Ok(json) = serde_json::to_string(&binding) else {
             return;
         };
-        let ttl_secs = ttl.as_secs().max(1);
         let _: Result<(), _> = conn.set_ex(Self::make_key(key), json, ttl_secs).await;
     }
 

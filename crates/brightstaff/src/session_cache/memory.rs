@@ -9,9 +9,9 @@ use lru::LruCache;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use super::{CachedRoute, SessionCache};
+use super::{SessionBinding, SessionCache};
 
-type CacheStore = Mutex<LruCache<String, (CachedRoute, Instant, Duration)>>;
+type CacheStore = Mutex<LruCache<String, (SessionBinding, Instant, Duration)>>;
 
 pub struct MemorySessionCache {
     store: Arc<CacheStore>,
@@ -38,6 +38,8 @@ impl MemorySessionCache {
 
     async fn evict_expired(store: &CacheStore) {
         let mut cache = store.lock().await;
+        // The TTL is only a GC bound: drop bindings once they've outlived the window
+        // in which they could plausibly still be warm.
         let expired: Vec<String> = cache
             .iter()
             .filter(|(_, (_, inserted_at, ttl))| inserted_at.elapsed() >= *ttl)
@@ -59,21 +61,21 @@ impl MemorySessionCache {
 
 #[async_trait]
 impl SessionCache for MemorySessionCache {
-    async fn get(&self, key: &str) -> Option<CachedRoute> {
+    async fn get(&self, key: &str) -> Option<SessionBinding> {
         let mut cache = self.store.lock().await;
-        if let Some((route, inserted_at, ttl)) = cache.get(key) {
+        if let Some((binding, inserted_at, ttl)) = cache.get(key) {
             if inserted_at.elapsed() < *ttl {
-                return Some(route.clone());
+                return Some(binding.clone());
             }
         }
         None
     }
 
-    async fn put(&self, key: &str, route: CachedRoute, ttl: Duration) {
+    async fn put(&self, key: &str, binding: SessionBinding, ttl: Duration) {
         self.store
             .lock()
             .await
-            .put(key.to_string(), (route, Instant::now(), ttl));
+            .put(key.to_string(), (binding, Instant::now(), ttl));
     }
 
     async fn remove(&self, key: &str) {

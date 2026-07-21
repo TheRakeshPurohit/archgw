@@ -216,7 +216,14 @@ async fn init_app_state(
         if latency_count > 1 {
             return Err("model_metrics_sources: only one latency metrics source is allowed".into());
         }
-        let svc = ModelMetricsService::new(sources, reqwest::Client::new()).await;
+        // The initial pricing fetch is awaited before listeners come up, so bound it —
+        // an unresponsive feed (models.dev / DO catalog) must not hang startup. The
+        // same client backs the periodic refresh loop.
+        let metrics_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let svc = ModelMetricsService::new(sources, metrics_client).await;
         Some(Arc::new(svc))
     } else {
         None
@@ -343,6 +350,55 @@ async fn init_app_state(
 
     let signals_enabled = !overrides.disable_signals.unwrap_or(false);
 
+    let prompt_caching =
+        common::configuration::EffectivePromptCaching::from_config(config.prompt_caching.as_ref())?;
+
+    // Routing budget lives under `routing` and is independent of prompt caching.
+    let routing_budget = common::configuration::EffectiveRoutingBudget::from_config(
+        config
+            .routing
+            .as_ref()
+            .and_then(|r| r.routing_budget.as_ref()),
+    )?;
+
+    // The routing-budget cost gate needs per-model pricing to compute switch cost.
+    if routing_budget.is_some() {
+        use common::configuration::MetricsSource;
+        let has_cost_source = config
+            .model_metrics_sources
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|s| matches!(s, MetricsSource::Cost(_)));
+        if !has_cost_source {
+            return Err(
+                "routing.routing_budget is configured but no cost metrics source is \
+                 configured — add a cost source (e.g. models.dev) to model_metrics_sources so \
+                 per-model input/cached rates are available for the switch-cost calculation"
+                    .into(),
+            );
+        }
+    }
+
+    // Session bindings (anchor model, budget spend) are keyed by tenant + session.
+    // Without a tenant header, sessions from different customers share one keyspace,
+    // so identical prompts from different tenants would collide on the same binding.
+    let session_state_in_use = prompt_caching.session_affinity || routing_budget.is_some();
+    if session_state_in_use
+        && config
+            .routing
+            .as_ref()
+            .and_then(|r| r.session_cache.as_ref())
+            .and_then(|c| c.tenant_header.as_ref())
+            .is_none()
+    {
+        warn!(
+            "session affinity / routing budget is enabled but routing.session_cache.tenant_header \
+             is not set — all requests share one session keyspace; set tenant_header to isolate \
+             sessions per customer in multi-tenant deployments"
+        );
+    }
+
     Ok(AppState {
         orchestrator_service,
         model_aliases: config.model_aliases.clone(),
@@ -356,6 +412,8 @@ async fn init_app_state(
         http_client: reqwest::Client::new(),
         filter_pipeline,
         signals_enabled,
+        prompt_caching,
+        routing_budget,
     })
 }
 
@@ -527,6 +585,8 @@ async fn dispatch(
                 Arc::clone(&state.orchestrator_service),
                 stripped,
                 &state.span_attributes,
+                state.prompt_caching,
+                state.routing_budget,
             )
             .with_context(parent_cx)
             .await;

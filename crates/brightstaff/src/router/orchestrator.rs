@@ -20,9 +20,41 @@ use crate::metrics::labels as metric_labels;
 use crate::router::orchestrator_model_v1;
 use crate::session_cache::SessionCache;
 
-pub use crate::session_cache::CachedRoute;
+pub use crate::session_cache::SessionBinding;
 
 const DEFAULT_SESSION_TTL_SECONDS: u64 = 600;
+const TOKENS_PER_MILLION: f64 = 1_000_000.0;
+
+/// Input-cost of moving a session off its anchor onto `candidate`.
+///
+/// Staying re-reads the whole context at the anchor's read rate (`anchor_read_rate` — the
+/// cached rate when prompt caching keeps the anchor warm, the plain uncached rate when it
+/// doesn't). The candidate re-reads `candidate_warm_tokens` (whatever it still has cached
+/// from an earlier visit this session) at *its* cached rate, and the remaining,
+/// freshly-appended tokens at its uncached rate. When the candidate is cold
+/// (`candidate_warm_tokens == 0`) this reduces to the whole context at the uncached rate —
+/// i.e. a first-time switch. Crediting warm tokens is what makes an A→B→A return cheap:
+/// on the way back A still holds most of the context, so only the delta is re-ingested.
+///
+/// Deliberately input-only: output-token savings are unknowable before the response is
+/// generated (reasoning models can emit 5-10x the tokens for the same task), so they are
+/// never credited. Rates are USD per million tokens. Negative when the switch is outright
+/// cheaper than staying; the caller draws a positive cost down from the overhead cap.
+pub fn switch_cost_in_usd(
+    context_tokens: u64,
+    candidate_warm_tokens: u64,
+    anchor_read_rate: f64,
+    candidate_uncached_rate: f64,
+    candidate_cached_rate: f64,
+) -> f64 {
+    let warm = candidate_warm_tokens.min(context_tokens);
+    let fresh = context_tokens - warm;
+    let candidate_cost = (fresh as f64 * candidate_uncached_rate
+        + warm as f64 * candidate_cached_rate)
+        / TOKENS_PER_MILLION;
+    let anchor_cost = context_tokens as f64 * anchor_read_rate / TOKENS_PER_MILLION;
+    candidate_cost - anchor_cost
+}
 
 pub struct OrchestratorService {
     orchestrator_url: String,
@@ -126,41 +158,124 @@ impl OrchestratorService {
         }
     }
 
-    pub async fn get_cached_route(
+    /// Look up a session binding. Warmth is the caller's concern (time since
+    /// `last_used`); this only reports whether a binding exists.
+    pub async fn get_binding(
         &self,
         session_id: &str,
         tenant_id: Option<&str>,
-    ) -> Option<CachedRoute> {
+    ) -> Option<SessionBinding> {
         let cache = self.session_cache.as_ref()?;
         let result = cache.get(&Self::session_key(tenant_id, session_id)).await;
-        bs_metrics::record_session_cache_event(if result.is_some() {
-            metric_labels::SESSION_CACHE_HIT
-        } else {
-            metric_labels::SESSION_CACHE_MISS
+        bs_metrics::record_session_cache_event(match result {
+            Some(_) => metric_labels::SESSION_CACHE_HIT,
+            None => metric_labels::SESSION_CACHE_MISS,
         });
         result
     }
 
-    pub async fn cache_route(
+    /// The GC bound for a session binding: the per-scope override when provided,
+    /// otherwise the global `routing.session_ttl_seconds`. This only governs when an
+    /// idle binding is reclaimed from memory — not whether its cache is warm.
+    pub fn effective_session_ttl(&self, ttl_override_seconds: Option<u64>) -> Duration {
+        ttl_override_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(self.session_ttl)
+    }
+
+    /// Persist a session binding with a GC bound (defaults to `routing.session_ttl_seconds`
+    /// when `gc_ttl` is `None`).
+    pub async fn store_binding(
         &self,
-        session_id: String,
+        session_id: &str,
         tenant_id: Option<&str>,
-        model_name: String,
-        route_name: Option<String>,
+        binding: SessionBinding,
+        gc_ttl: Option<Duration>,
     ) {
         if let Some(ref cache) = self.session_cache {
             cache
                 .put(
-                    &Self::session_key(tenant_id, &session_id),
-                    CachedRoute {
-                        model_name,
-                        route_name,
-                    },
-                    self.session_ttl,
+                    &Self::session_key(tenant_id, session_id),
+                    binding,
+                    gc_ttl.unwrap_or(self.session_ttl),
                 )
                 .await;
             bs_metrics::record_session_cache_event(metric_labels::SESSION_CACHE_STORE);
         }
+    }
+
+    /// Structured per-million pricing for a model, from the configured cost feed.
+    /// `None` when no cost source is configured or the model is unknown to the feed.
+    pub async fn model_rates(&self, model: &str) -> Option<super::model_metrics::ModelRates> {
+        self.metrics_service.as_ref()?.model_rates(model).await
+    }
+
+    /// Estimate the input-cost (USD) of switching a session from `anchor_model`
+    /// (the model that handled the latest request) to `candidate_model`.
+    ///
+    /// When `caching_enabled`, the anchor is warm, so staying re-reads the context at its
+    /// *cached* rate and `candidate_warm_tokens` (context the candidate still holds from an
+    /// earlier visit this session) re-read at the candidate's cached rate. When caching is
+    /// off there is no warm cache on either side: staying re-reads at the anchor's *plain*
+    /// (uncached) rate and the candidate re-ingests the whole context uncached (no
+    /// warm-token credit), so the cost collapses to
+    /// `context_tokens x (candidate_uncached_rate - anchor_uncached_rate) / 1M`.
+    ///
+    /// Fetches per-model rates from the configured cost feed; returns `None` when pricing
+    /// is missing for either side so the caller can fail open (switch freely) rather than
+    /// veto the router on guesswork. `cache_read_discount` estimates a model's cached-read
+    /// rate when the feed doesn't publish one. Negative when the switch is outright cheaper.
+    pub async fn estimate_switch_cost_in_usd(
+        &self,
+        context_tokens: u64,
+        anchor_model: &str,
+        candidate_model: &str,
+        candidate_warm_tokens: u64,
+        cache_read_discount: f64,
+        caching_enabled: bool,
+    ) -> Option<f64> {
+        let anchor = self.model_rates(anchor_model).await?;
+        let candidate = self.model_rates(candidate_model).await?;
+        let (anchor_read_rate, candidate_warm_tokens) = if caching_enabled {
+            (
+                anchor.cached_input_rate(cache_read_discount),
+                candidate_warm_tokens,
+            )
+        } else {
+            (anchor.input_per_million, 0)
+        };
+        Some(switch_cost_in_usd(
+            context_tokens,
+            candidate_warm_tokens,
+            anchor_read_rate,
+            candidate.input_per_million,
+            candidate.cached_input_rate(cache_read_discount),
+        ))
+    }
+
+    /// This turn's contribution to the session's *never-switch* baseline: the USD cost of
+    /// reading `context_tokens` on `model` — the session's `default_model`, i.e. what it
+    /// would have paid by never switching (not the possibly-drifted current anchor). Priced
+    /// at the cached input rate when `caching_enabled` (the never-switch path stays warm),
+    /// at the plain uncached rate otherwise (nothing is cached, so every turn re-reads the
+    /// full context). Summed across turns, this is the denominator the percentage overhead
+    /// cap is measured against. `None` when the model has no pricing (the caller then can't
+    /// grow the baseline this turn).
+    pub async fn context_read_cost_in_usd(
+        &self,
+        context_tokens: u64,
+        model: &str,
+        cache_read_discount: f64,
+        caching_enabled: bool,
+    ) -> Option<f64> {
+        let rates = self.model_rates(model).await?;
+        let context_millions = context_tokens as f64 / TOKENS_PER_MILLION;
+        let rate = if caching_enabled {
+            rates.cached_input_rate(cache_read_discount)
+        } else {
+            rates.input_per_million
+        };
+        Some(context_millions * rate)
     }
 
     // ---- LLM routing ----
@@ -348,86 +463,190 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_returns_none() {
-        let svc = make_orchestrator_service(600, 100);
-        assert!(svc
-            .get_cached_route("unknown-session", None)
-            .await
-            .is_none());
+    fn binding(model: &str, route_name: Option<&str>) -> SessionBinding {
+        SessionBinding {
+            anchor_model: model.to_string(),
+            default_model: model.to_string(),
+            route_name: route_name.map(|r| r.to_string()),
+            prefix_hash: None,
+            last_used: std::time::SystemTime::now(),
+            cached_tokens: 0,
+            baseline_usd: 0.0,
+            switch_spend_usd: 0.0,
+            switches: 0,
+            session_cost_usd: 0.0,
+            history: Vec::new(),
+        }
     }
 
     #[tokio::test]
-    async fn test_cache_hit_returns_cached_route() {
+    async fn test_cache_miss_returns_none() {
         let svc = make_orchestrator_service(600, 100);
-        svc.cache_route(
-            "s1".to_string(),
-            None,
-            "gpt-4o".to_string(),
-            Some("code".to_string()),
-        )
-        .await;
+        assert!(svc.get_binding("unknown-session", None).await.is_none());
+    }
 
-        let cached = svc.get_cached_route("s1", None).await.unwrap();
-        assert_eq!(cached.model_name, "gpt-4o");
+    #[tokio::test]
+    async fn test_cache_hit_returns_binding() {
+        let svc = make_orchestrator_service(600, 100);
+        svc.store_binding("s1", None, binding("gpt-4o", Some("code")), None)
+            .await;
+
+        let cached = svc.get_binding("s1", None).await.unwrap();
+        assert_eq!(cached.anchor_model, "gpt-4o");
         assert_eq!(cached.route_name, Some("code".to_string()));
     }
 
     #[tokio::test]
     async fn test_cache_expired_entry_returns_none() {
         let svc = make_orchestrator_service(0, 100);
-        svc.cache_route("s1".to_string(), None, "gpt-4o".to_string(), None)
+        svc.store_binding("s1", None, binding("gpt-4o", None), None)
             .await;
-        assert!(svc.get_cached_route("s1", None).await.is_none());
+        assert!(svc.get_binding("s1", None).await.is_none());
     }
 
     #[tokio::test]
     async fn test_expired_entries_not_returned() {
         let svc = make_orchestrator_service(0, 100);
-        svc.cache_route("s1".to_string(), None, "gpt-4o".to_string(), None)
+        svc.store_binding("s1", None, binding("gpt-4o", None), None)
             .await;
-        svc.cache_route("s2".to_string(), None, "claude".to_string(), None)
+        svc.store_binding("s2", None, binding("claude", None), None)
             .await;
 
-        assert!(svc.get_cached_route("s1", None).await.is_none());
-        assert!(svc.get_cached_route("s2", None).await.is_none());
+        assert!(svc.get_binding("s1", None).await.is_none());
+        assert!(svc.get_binding("s2", None).await.is_none());
     }
 
     #[tokio::test]
     async fn test_cache_evicts_oldest_when_full() {
         let svc = make_orchestrator_service(600, 2);
-        svc.cache_route("s1".to_string(), None, "model-a".to_string(), None)
+        svc.store_binding("s1", None, binding("model-a", None), None)
             .await;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        svc.cache_route("s2".to_string(), None, "model-b".to_string(), None)
+        svc.store_binding("s2", None, binding("model-b", None), None)
             .await;
 
-        svc.cache_route("s3".to_string(), None, "model-c".to_string(), None)
+        svc.store_binding("s3", None, binding("model-c", None), None)
             .await;
 
-        assert!(svc.get_cached_route("s1", None).await.is_none());
-        assert!(svc.get_cached_route("s2", None).await.is_some());
-        assert!(svc.get_cached_route("s3", None).await.is_some());
+        assert!(svc.get_binding("s1", None).await.is_none());
+        assert!(svc.get_binding("s2", None).await.is_some());
+        assert!(svc.get_binding("s3", None).await.is_some());
     }
 
     #[tokio::test]
     async fn test_cache_update_existing_session_does_not_evict() {
         let svc = make_orchestrator_service(600, 2);
-        svc.cache_route("s1".to_string(), None, "model-a".to_string(), None)
+        svc.store_binding("s1", None, binding("model-a", None), None)
             .await;
-        svc.cache_route("s2".to_string(), None, "model-b".to_string(), None)
+        svc.store_binding("s2", None, binding("model-b", None), None)
             .await;
 
-        svc.cache_route(
-            "s1".to_string(),
+        svc.store_binding("s1", None, binding("model-a-updated", Some("route")), None)
+            .await;
+
+        let s1 = svc.get_binding("s1", None).await.unwrap();
+        assert_eq!(s1.anchor_model, "model-a-updated");
+        assert!(svc.get_binding("s2", None).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_gc_ttl_override_extends_binding_lifetime() {
+        // Global GC bound of 0 would reclaim immediately; the per-call override keeps it.
+        let svc = make_orchestrator_service(0, 100);
+        svc.store_binding(
+            "s1",
             None,
-            "model-a-updated".to_string(),
-            Some("route".to_string()),
+            binding("gpt-4o", None),
+            Some(Duration::from_secs(600)),
         )
         .await;
+        let cached = svc.get_binding("s1", None).await.unwrap();
+        assert_eq!(cached.anchor_model, "gpt-4o");
+    }
 
-        let s1 = svc.get_cached_route("s1", None).await.unwrap();
-        assert_eq!(s1.model_name, "model-a-updated");
-        assert!(svc.get_cached_route("s2", None).await.is_some());
+    #[tokio::test]
+    async fn test_binding_fields_round_trip_through_cache() {
+        let svc = make_orchestrator_service(600, 100);
+        let mut b = binding("gpt-4o", None);
+        b.prefix_hash = Some(0xdead_beef);
+        b.cached_tokens = 12_345;
+        b.baseline_usd = 1.5;
+        b.switch_spend_usd = 0.42;
+        b.switches = 3;
+        b.session_cost_usd = 2.75;
+        svc.store_binding("s1", None, b, None).await;
+
+        let cached = svc.get_binding("s1", None).await.unwrap();
+        assert_eq!(cached.prefix_hash, Some(0xdead_beef));
+        assert_eq!(cached.cached_tokens, 12_345);
+        assert!((cached.baseline_usd - 1.5).abs() < 1e-9);
+        assert!((cached.switch_spend_usd - 0.42).abs() < 1e-9);
+        assert_eq!(cached.switches, 3);
+        assert!((cached.session_cost_usd - 2.75).abs() < 1e-9);
+    }
+
+    // ---- switch-cost math ----
+    //
+    // Real models.dev rates (USD per million input tokens):
+    //   claude-opus-4-1:   input 15,  cache_read 1.5
+    //   claude-sonnet-4-5: input 3,   cache_read 0.3
+    //   claude-haiku-4-5:  input 1,   cache_read 0.1
+    //   gpt-4.1:           input 2,   cache_read 0.5
+
+    #[test]
+    fn negative_cost_when_candidate_undercuts_cached_rate() {
+        // Anchor opus (cached 1.5) -> haiku (uncached 1.0) over 100k context, cold
+        // candidate: cost = 0.1M x (1.0 - 1.5) = -$0.05 — cheaper even after re-reading.
+        let cost = switch_cost_in_usd(100_000, 0, 1.5, 1.0, 0.1);
+        assert!((cost - (-0.05)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn positive_cost_when_candidate_pricier_than_cached_rate() {
+        // Anchor opus (cached 1.5) -> gpt-4.1 (uncached 2.0) over 100k, cold candidate:
+        // cost = 0.1M x (2.0 - 1.5) = +$0.05.
+        let cost = switch_cost_in_usd(100_000, 0, 1.5, 2.0, 0.5);
+        assert!((cost - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn large_context_amplifies_cost() {
+        // Anchor sonnet (cached 0.3) -> gpt-5.5-class (uncached 5.0) over 150k, cold:
+        // cost = 0.15M x (5.0 - 0.3) = +$0.705.
+        let cost = switch_cost_in_usd(150_000, 0, 0.3, 5.0, 0.5);
+        assert!((cost - 0.705).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_scales_linearly_with_context() {
+        let small = switch_cost_in_usd(10_000, 0, 0.3, 0.8, 0.1);
+        let large = switch_cost_in_usd(1_000_000, 0, 0.3, 0.8, 0.1);
+        assert!((large / small - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tiny_context_cost_is_negligible() {
+        // 2k-token chat: even an expensive candidate costs ~$0.009.
+        let cost = switch_cost_in_usd(2_000, 0, 0.3, 5.0, 0.5);
+        assert!(cost < 0.01);
+    }
+
+    #[test]
+    fn warm_return_charges_only_the_delta() {
+        // Anchor sonnet (cached 0.3). Candidate gpt-4.1 (uncached 2.0, cached 0.5) is
+        // still warm from an earlier visit holding 90k of the 100k context. Only the
+        // 10k fresh tokens re-read at 2.0; the 90k warm tokens re-read at 0.5:
+        //   candidate = (10k x 2.0 + 90k x 0.5)/1M = 0.020 + 0.045 = $0.065
+        //   anchor    = 100k x 0.3 /1M            = $0.030
+        //   switch    = 0.065 - 0.030            = +$0.035
+        let warm = switch_cost_in_usd(100_000, 90_000, 0.3, 2.0, 0.5);
+        assert!(
+            (warm - 0.035).abs() < 1e-9,
+            "warm-return cost {warm} != 0.035"
+        );
+        // Cold, same switch re-reads the whole 100k at 2.0: (100k x 2.0)/1M - 0.03 = $0.17.
+        let cold = switch_cost_in_usd(100_000, 0, 0.3, 2.0, 0.5);
+        assert!((cold - 0.17).abs() < 1e-9, "cold cost {cold} != 0.17");
+        assert!(warm < cold, "returning to a warm model must be cheaper");
     }
 }

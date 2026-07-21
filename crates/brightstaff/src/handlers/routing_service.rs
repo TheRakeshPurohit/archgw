@@ -1,9 +1,11 @@
 use bytes::Bytes;
-use common::configuration::{SpanAttributes, TopLevelRoutingPreference};
+use common::configuration::{
+    EffectivePromptCaching, EffectiveRoutingBudget, SpanAttributes, TopLevelRoutingPreference,
+};
 use common::consts::{MODEL_AFFINITY_HEADER, REQUEST_ID_HEADER};
 use common::errors::BrightStaffError;
 use hermesllm::clients::SupportedAPIsFromClient;
-use hermesllm::ProviderRequestType;
+use hermesllm::{ProviderRequest, ProviderRequestType};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
@@ -12,6 +14,7 @@ use tracing::{debug, info, info_span, warn, Instrument};
 
 use super::extract_or_generate_traceparent;
 use crate::handlers::llm::model_selection::router_chat_get_upstream_model;
+use crate::handlers::llm::session_router;
 use crate::metrics as bs_metrics;
 use crate::metrics::labels as metric_labels;
 use crate::router::orchestrator::OrchestratorService;
@@ -60,11 +63,14 @@ struct RoutingDecisionResponse {
     pinned: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn routing_decision(
     request: Request<hyper::body::Incoming>,
     orchestrator_service: Arc<OrchestratorService>,
     request_path: String,
     span_attributes: &Option<SpanAttributes>,
+    prompt_caching: EffectivePromptCaching,
+    routing_budget: Option<EffectiveRoutingBudget>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     let request_headers = request.headers().clone();
     let request_id: String = request_headers
@@ -73,7 +79,7 @@ pub async fn routing_decision(
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let session_id: Option<String> = request_headers
+    let explicit_session_id: Option<String> = request_headers
         .get(MODEL_AFFINITY_HEADER)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
@@ -101,8 +107,10 @@ pub async fn routing_decision(
         request_path,
         request_headers,
         custom_attrs,
-        session_id,
+        explicit_session_id,
         tenant_id,
+        prompt_caching,
+        routing_budget,
     )
     .instrument(request_span)
     .await
@@ -116,8 +124,10 @@ async fn routing_decision_inner(
     request_path: String,
     request_headers: hyper::HeaderMap,
     custom_attrs: std::collections::HashMap<String, String>,
-    session_id: Option<String>,
+    explicit_session_id: Option<String>,
     tenant_id: Option<String>,
+    prompt_caching: EffectivePromptCaching,
+    routing_budget: Option<EffectiveRoutingBudget>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     set_service_name(operation_component::ROUTING);
     opentelemetry::trace::get_active_span(|span| {
@@ -135,37 +145,9 @@ async fn routing_decision_inner(
         .unwrap_or("unknown")
         .to_string();
 
-    if let Some(ref sid) = session_id {
-        if let Some(cached) = orchestrator_service
-            .get_cached_route(sid, tenant_id.as_deref())
-            .await
-        {
-            info!(
-                session_id = %sid,
-                model = %cached.model_name,
-                route = ?cached.route_name,
-                "returning pinned routing decision from cache"
-            );
-            let response = RoutingDecisionResponse {
-                models: vec![cached.model_name],
-                route: cached.route_name,
-                trace_id,
-                session_id: Some(sid.clone()),
-                pinned: true,
-            };
-            let json = serde_json::to_string(&response).unwrap();
-            let body = Full::new(Bytes::from(json))
-                .map_err(|never| match never {})
-                .boxed();
-            return Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .unwrap());
-        }
-    }
-
-    // Parse request body
+    // Parse the request body up front so a pin can be validated against prefix drift
+    // and a fresh pin can be stored with its prefix hash. This endpoint shares the
+    // session cache with the LLM handler, so both must key drift the same way.
     let raw_bytes = request.collect().await?.to_bytes();
 
     debug!(
@@ -202,6 +184,39 @@ async fn routing_decision_inner(
         }
     };
 
+    // `X-Plano-Cache: off` opts this request out of implicit affinity (same sentinel
+    // the LLM handler honors), so callers can bypass stickiness per request.
+    let cache_off_for_request = request_headers
+        .get(common::consts::PLANO_CACHE_HEADER)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("off"));
+
+    let request_messages = client_request.get_messages();
+    let tool_names = client_request.get_tool_names();
+
+    // Session key + prefix hash resolved identically to the LLM handler so pins
+    // interoperate across the full-proxy and decision paths.
+    // Derive the implicit session key when either prompt-caching affinity or the routing
+    // budget is active, so the budget works the same way with caching off.
+    let implicit_affinity_enabled = prompt_caching.session_affinity || routing_budget.is_some();
+    let session_router::SessionResolution {
+        request_prefix_hash,
+        session_id,
+    } = session_router::resolve_session(
+        explicit_session_id,
+        &request_messages,
+        tool_names.as_deref(),
+        tenant_id.as_deref(),
+        implicit_affinity_enabled,
+        cache_off_for_request,
+    );
+
+    let context_tokens: u64 = if session_id.is_some() && routing_budget.is_some() {
+        session_router::actual_context_tokens(&request_messages, client_request.model())
+    } else {
+        0
+    };
+
     let routing_result = router_chat_get_upstream_model(
         Arc::clone(&orchestrator_service),
         client_request,
@@ -213,23 +228,38 @@ async fn routing_decision_inner(
 
     match routing_result {
         Ok(result) => {
-            if let Some(ref sid) = session_id {
-                orchestrator_service
-                    .cache_route(
-                        sid.clone(),
-                        tenant_id.as_deref(),
-                        result.model_name.clone(),
-                        result.route_name.clone(),
-                    )
-                    .await;
+            let candidate_model = result.model_name.clone();
+            let decision = session_router::route(
+                &orchestrator_service,
+                routing_budget.as_ref(),
+                session_router::RouteFacts {
+                    session_id: session_id.as_deref(),
+                    tenant_id: tenant_id.as_deref(),
+                    prefix_hash: request_prefix_hash,
+                    context_tokens,
+                    candidate_model: &candidate_model,
+                    candidate_route: result.route_name.as_deref(),
+                    caching_enabled: prompt_caching.enabled,
+                },
+            )
+            .await;
+
+            // Front the ranked fallback list with the decided model (the anchor, when a
+            // switch was vetoed), so 429/5xx fallbacks still work.
+            let mut models = result.models;
+            if models.first() != Some(&decision.model) {
+                models.retain(|m| m != &decision.model);
+                models.insert(0, decision.model.clone());
             }
 
             let response = RoutingDecisionResponse {
-                models: result.models,
-                route: result.route_name,
+                models,
+                route: decision.route_name,
                 trace_id,
                 session_id,
-                pinned: false,
+                // `pinned` signals a warm, stuck session — safe for callers to treat as
+                // "keep this provider's cache warm".
+                pinned: decision.warm,
             };
 
             // Distinguish "decision served" (a concrete model picked) from
@@ -247,6 +277,7 @@ async fn routing_decision_inner(
                 primary_model = %response.models.first().map(|s| s.as_str()).unwrap_or("none"),
                 total_models = response.models.len(),
                 route = ?response.route,
+                pinned = response.pinned,
                 "routing decision completed"
             );
 

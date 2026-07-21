@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common::configuration::{Agent, FilterPipeline, Listener, ModelAlias, SpanAttributes};
+use common::configuration::{
+    Agent, EffectivePromptCaching, EffectiveRoutingBudget, FilterPipeline, Listener, ModelAlias,
+    SpanAttributes,
+};
 use common::llm_providers::LlmProviders;
 use tokio::sync::RwLock;
 
@@ -31,4 +34,10 @@ pub struct AppState {
     /// When false, agentic signal analysis is skipped on LLM responses to save CPU.
     /// Controlled by `overrides.disable_signals` in plano config.
     pub signals_enabled: bool,
+    /// Instance-wide automatic prompt-caching settings, resolved once from the
+    /// top-level `prompt_caching` config. Disabled by default (opt-in).
+    pub prompt_caching: EffectivePromptCaching,
+    /// Per-session model-switch cost gate, resolved from `routing.routing_budget`.
+    /// Independent of prompt caching; `None` when not configured (off by default).
+    pub routing_budget: Option<EffectiveRoutingBudget>,
 }

@@ -1,0 +1,77 @@
+version: v0.3.0
+
+listeners:
+  - type: model
+    name: model_listener
+    port: 12000
+
+model_providers:
+
+  - model: openai/gpt-4o-mini
+    access_key: $OPENAI_API_KEY
+    default: true
+
+  - model: openai/gpt-4o
+    access_key: $OPENAI_API_KEY
+    routing_preferences:
+      - name: code understanding
+        description: understand and explain existing code snippets, functions, or libraries
+
+  - model: anthropic/claude-sonnet-4-6
+    access_key: $ANTHROPIC_API_KEY
+    routing_preferences:
+      - name: code generation
+        description: generating new code snippets, functions, or boilerplate based on user prompts or requirements
+
+# Per-model pricing is required for the routing budget: the switch-cost
+# calculation needs each model's input and cached-input rates.
+model_metrics_sources:
+  - type: cost
+    provider: models.dev
+    refresh_interval: 86400
+
+# Automatic prompt caching (opt-in). Keeps a conversation pinned to the same
+# model so the upstream provider's prompt cache stays warm across turns, and
+# auto-injects cache-control markers where the provider needs them. This is a
+# separate concern from the routing budget below.
+prompt_caching:
+  enabled: true
+
+routing:
+  # Per-session cost gate on model switching. Independent of prompt caching: it
+  # applies whenever configured, and presence of this block turns it on. The
+  # default posture is to stick to the model a session is warm on. When routing
+  # proposes a *different* model while that session's provider cache is plausibly
+  # still warm (inferred from how long ago the session was last used vs. the
+  # provider's cache window), the actual input-token cost of abandoning the cache:
+  #
+  #   switch_cost = context_tokens x (candidate_uncached_input - anchor_cached_input)
+  #
+  # (output cost deliberately excluded) accrues into the session's cumulative switch
+  # spend. A paid switch is allowed only while that spend stays within max_overhead_pct
+  # percent of the session's running never-switch baseline (what staying on the anchor
+  # would have cost); an outright-cheaper switch is free but never reduces the spend.
+  # The cap is yours to define -- Plano never invents one, and startup fails without it
+  # (or without a cost source).
+  routing_budget:
+    # Cap on cumulative switching overhead, as a percentage of what the session would
+    # have cost by never switching (a whole number: 20 = 20%). The promise is "this
+    # conversation bills at most 20% above never-switching." 0 means "never pay to
+    # switch"; larger values buy more switches before sticking. Typical range 10-30.
+    max_overhead_pct: 20
+
+    # Reset the running baseline/spend totals when a cold session re-binds. Default true.
+    # replenish_on_rebind: true
+
+    # Fallback used only when the pricing feed doesn't publish a cached-read rate for
+    # a model: cached_rate = input_rate x cache_read_discount. Default 0.1.
+    # cache_read_discount: 0.1
+
+    # Record the route the gate WOULD have taken when it vetoes a switch, as the
+    # `plano.switch.counterfactual_route` trace attribute. Telemetry only -- the
+    # counterfactual model is never dispatched. Handy for evals that want to
+    # measure the road not taken. Default false.
+    record_counterfactual: true
+
+tracing:
+  random_sampling: 100
